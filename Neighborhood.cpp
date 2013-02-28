@@ -9,6 +9,7 @@ Neighborhood::Neighborhood(SVMData& train, SVMData& test, int nc, int kk[]):sd(&
   nn[2] = kk[2];
   nn[3] = kk[3];
   findTarget();
+  cout << "target found" << endl;
   deviceInitTarget(target, train.ninst, target_size, &nclass, nn, target_offset);
   deviceInitLabelTrain(train.inst, train.ninst);
   deviceInitLabelTest(test.inst, test.ninst);
@@ -89,8 +90,10 @@ void Neighborhood::findTarget(){
     target_size += typecount[i] * nn[i];
   target = (int*)malloc(sizeof(int)*target_size);
   
+  cout << "ninst: " << ninst << endl;
   double *edistMatrix = (double*)malloc(sizeof(double)*ninst*ninst);
   calcEdistMatrix(edistMatrix);
+  cout << "edist done" << endl;
   acd = .0;
   int base = 0;
   for(int i = 0; i < ninst; ++ i){
@@ -116,6 +119,7 @@ void Neighborhood::findTarget(){
 	acd += dp[0].dist;
   }
   acd /= ninst;
+  free(edistMatrix);
 }
 
 int Neighborhood::getTarget(int i, int t){

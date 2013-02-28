@@ -28,6 +28,7 @@ int main(int argc, char** argv){
   
   SVMData data_train(filestem+".train");
   SVMData data_test(filestem+".test");
+  cout << "data loaded!" << endl;
   KernelNeighborhood nb(data_train, data_test, NClass, k);
   cout << nb.nfeat << "*" << nb.ninst << ", k=" << nb.k << endl;
   Solver s(nb, mu, alpha, nu);

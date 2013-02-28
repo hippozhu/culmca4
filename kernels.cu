@@ -271,7 +271,6 @@ __global__ void update3_2(){
 	    f_val += vdist;
       h = hinge(vdist);
 	  if (h > 0){
-	    //if (label_train[i] == TP)
 		h *= nu[label_train[i]];
 	    if (i % gridDim.x == bid)
 		  updateTri(i, l, j, h);
@@ -291,7 +290,6 @@ __global__ void update3_2(){
 	    f_val += vdist;
       h = hinge(vdist);
 	  if (h > 0){
-	    //if (label_train[i] == TP)
 		h *= nu[label_train[i]];
 	    if (i % gridDim.x == bid)
 		  updateTri(i, l, j, h);
@@ -452,12 +450,10 @@ __global__ void knnFindNeighbor(){
 }
 
 __global__ void knnMatching(){
-  //int ub = ntest * k;
   int ub = ntest * nnegibor;
   int stride = blockDim.x * gridDim.x;  
   int idx_test, idx_train;
   for (int m = blockIdx.x * blockDim.x + threadIdx.x; m < ub; m += stride){
-    //idx_test = m / k;
     idx_test = m / nnegibor;
 	idx_train = neighbor_knn[m];
 	if (label_test[idx_test] == label_train[idx_train])
@@ -592,7 +588,6 @@ __global__ void knnFindNeighbor_train(){
 	
 	__syncthreads();
 	if(tid == 0)
-	  //setElementInt(neighbor_knn, bid, i, k, ino[0]);
 	  setElementInt(neighbor_knn, bid, i, nnegibor, ino[0]);
 	if(tid == shortest[0]){
 	  -- b;
@@ -600,6 +595,61 @@ __global__ void knnFindNeighbor_train(){
 	}
   }
 }
+
+
+__global__ void knnMatching_train(){
+  int ub = ntrain * nnegibor;
+  int stride = blockDim.x * gridDim.x;  
+  int idx_train1, idx_train2;
+  for (int m = blockIdx.x * blockDim.x + threadIdx.x; m < ub; m += stride){
+    idx_train1 = m / nnegibor;
+	idx_train2 = neighbor_knn[m];
+	if (label_train[idx_train1] == label_train[idx_train2])
+	  neighbor_knn[m] = 1;
+	else
+	  neighbor_knn[m] = 0;
+  }
+}
+
+// lauch with single block
+__global__ void knnAcc_train(int neiborhood_size){
+  int tid = threadIdx.x;
+  int stride = blockDim.x;
+  
+  if (tid < 4)
+    hits[tid] = 0;
+	
+  __shared__ int matched[BSIZE];
+  matched[tid] = 0;
+  
+  for (int m = tid; m < ntrain; m += stride){
+    int nsametype = 0;
+    for (int i = 0; i < neiborhood_size; ++ i)
+	  nsametype += neighbor_knn[m * nnegibor + i];
+	if (nsametype > neiborhood_size/2){
+	  matched[tid] += 1;
+	  if (label_train[m] == FN || label_train[m] == FP)
+	    atomicAdd(&hits[label_train[m]], 1);
+	}
+	else{
+	  if (label_train[m] == TN || label_train[m] == TP)
+	    atomicSub(&hits[label_train[m]], 1);
+	}
+  }
+  
+  int stride1 = blockDim.x/2;
+  while (stride1 > 0){
+	__syncthreads();
+	if (tid < stride1)
+	  matched[tid] += matched[tid + stride1];
+	stride1 /= 2;
+  }
+  
+  __syncthreads();  
+  if (tid ==0)
+    acc_knn = 1.0 * matched[0] / ntrain;
+}
+
 
 __global__ void updateTarget(){
   int tid = threadIdx.x;
@@ -685,9 +735,6 @@ __global__ void countTarget(){
   }
 }
 
-unsigned *tcount;
-int *ncount;
-
 void deviceInitKernelMatrix(int *trainninst, int *testninst, int *nf, double *traindata, double *testdata){
 
   cudaMemcpyToSymbol(ntrain, trainninst, sizeof(int), 0, cudaMemcpyHostToDevice);
@@ -722,6 +769,13 @@ void deviceInitKernelMatrix(int *trainninst, int *testninst, int *nf, double *tr
   cudaFree(d_train_data);
   cudaFree(d_test_data);
 }
+
+unsigned *tcount;
+int *ncount;
+int totalMissed;
+double targetCoverage[4];
+double minCoverage;
+int super = 0;
 
 void deviceInitTarget(int *h_target, int trainninst, int targetsize, int *nc, int *Nneighbor, int *offset){
   ncount = Nneighbor;
@@ -805,14 +859,10 @@ void deviceInitInstList(struct Inst *inst, unsigned *count, unsigned ninst, int 
   cudaMalloc((void **)&distanceTarget, sizeof(double) * targetsize);
   cudaMemcpyToSymbol(dist_target, &distanceTarget, sizeof(double *), 0, cudaMemcpyHostToDevice);
   
-  if (nc == 2){
-    cudaMalloc((void **)&distanceMatrix1, sizeof(double) * count[0] * count[1]);
-	cudaMemcpyToSymbol(dist1, &distanceMatrix1, sizeof(double *), 0, cudaMemcpyHostToDevice);
-  }
-  else{
-    cudaMalloc((void **)&distanceMatrix1, sizeof(double) * count[0] * count[3]);
-    cudaMalloc((void **)&distanceMatrix2, sizeof(double) * count[1] * count[2]);
-	cudaMemcpyToSymbol(dist1, &distanceMatrix1, sizeof(double *), 0, cudaMemcpyHostToDevice);
+  cudaMalloc((void **)&distanceMatrix1, sizeof(double) * count[TN] * count[FN]);
+  cudaMemcpyToSymbol(dist1, &distanceMatrix1, sizeof(double *), 0, cudaMemcpyHostToDevice);
+  if (nc == 4){
+    cudaMalloc((void **)&distanceMatrix2, sizeof(double) * count[TP] * count[FP]);
 	cudaMemcpyToSymbol(dist2, &distanceMatrix2, sizeof(double *), 0, cudaMemcpyHostToDevice);
   }
   
@@ -821,8 +871,11 @@ void deviceInitInstList(struct Inst *inst, unsigned *count, unsigned ninst, int 
 void deviceInitMu(double m, double n[]){
   double local_m = m;
   cudaMemcpyToSymbol(mu, &local_m, sizeof(double), 0, cudaMemcpyHostToDevice);
-  //double local_n = n;
   cudaMemcpyToSymbol(nu, n, sizeof(double) * 4, 0, cudaMemcpyHostToDevice);
+  double nn[4];
+  cudaMemcpyFromSymbol(nn, nu, sizeof(double) * 4, 0, cudaMemcpyDeviceToHost);
+  cout << "retrieve nu: " << nn[0] << " " << nn[1] << " " << nn[2] << " " << nn[3] << endl;
+  
 }
 
 void deviceInitO(double *o, int size){
@@ -878,18 +931,11 @@ void deviceInitKnn(int n_train, int n_test, int kk){
   cudaMemcpyToSymbol(nnegibor, &kk, sizeof(int), 0, cudaMemcpyHostToDevice);
 }
 
-int targetUpdateNeeded(double alpha, int h_hits[]){
-  double targetCoverage[4];
-  double minCoverage = 1.0;
-  for (int i = 0; i < 4; ++ i){
-    targetCoverage[i] = 1.0 * h_hits[i] / (tcount[i]*ncount[i]);
-	if (minCoverage > targetCoverage[i])
-	  minCoverage = targetCoverage[i];
+int targetUpdateNeeded(double alpha){
+  if (super){
+    super = 0;
+	return 1;
   }
-  int totalMissed = 0;
-  for (int i = 0; i < 4; ++ i)
-    totalMissed += tcount[i]*ncount[i] - h_hits[i];
-
   if (alpha < 1e-8 && totalMissed > 0)
   //if ((alpha < 1e-8 && totalMissed > 0) || minCoverage < 0.5)
     return 1;
@@ -908,12 +954,16 @@ void kernelTest(int d, int n, int n_test, int k[], double *result, double mu, do
   double min_iter = 0;
   double global_max_acc = .0;
   unsigned global_max_iter = 0;
+  unsigned global_max_pos = 0;
+  double global_max_acc_train = .0;
+  unsigned global_max_iter_train = 0;
+  unsigned global_max_pos_train = 0;
+  int kk = 5;
   
   bool targetUpdated = false;
   int idx = 1;
   unsigned iter = 0; 
   while(true){
-  
   // Run the event recording
   cudaEvent_t start_event, stop_event;
   cudaEventCreate(&start_event);
@@ -927,7 +977,7 @@ void kernelTest(int d, int n, int n_test, int k[], double *result, double mu, do
   
   
   // update target and target term periodically
-  if (targetUpdateNeeded(alpha, h_hits)){
+  if (targetUpdateNeeded(alpha)){
     knnUpdateDist_train<<<84, BSIZE>>>();
     knnFindNeighbor_train<<<n, BSIZE>>>();
     updateTarget<<<84, BSIZE>>>();
@@ -967,8 +1017,9 @@ void kernelTest(int d, int n, int n_test, int k[], double *result, double mu, do
       cudaThreadSynchronize();
       cudaMemcpyFromSymbol(h_hits, hits, sizeof(int) * 4, 0, cudaMemcpyDeviceToHost);
       cudaMemcpyFromSymbol(&dd[i], acc_knn, sizeof(double), 0, cudaMemcpyDeviceToHost);
-      //cout << dd[i] << "(" << h_hits[0] << "," << h_hits[1] << "), ";
       cout << h_hits[0] + h_hits[1] + h_hits[2] + h_hits[3] << "(" << h_hits[0] << "," << h_hits[1] << "," << h_hits[2] << "," << h_hits[3] << "), ";
+	  //if (2 * i + 1 == kk && h_hits[0] + h_hits[1] + h_hits[2] + h_hits[3] >= 0)
+	    //super = 1;
     }
   
     double max_acc = .0;
@@ -983,20 +1034,59 @@ void kernelTest(int d, int n, int n_test, int k[], double *result, double mu, do
     if (max_acc >= global_max_acc&&iter>10){
       global_max_acc = max_acc;
 	  global_max_iter = iter;
+	  global_max_pos = max_acc_k;
     }
     cout << endl << "max acc = " << max_acc << " at k = " << max_acc_k 
-    << ". global max = " << global_max_acc << " at iter = " << global_max_iter;
+    << ". global max = " << global_max_acc << " in iter " << global_max_iter << " at k = " << global_max_pos << endl;
 	
     knnUpdateDist_train<<<84, BSIZE>>>();
     knnFindNeighbor_train<<<n, BSIZE>>>();
     countTarget<<<1, BSIZE>>>();
     cudaThreadSynchronize();
     cudaMemcpyFromSymbol(h_hits, hits, sizeof(int) * 4, 0, cudaMemcpyDeviceToHost);
-    cout << endl << "Targets: " 
+    cout << "Targets: " 
 	<< 1.0 * h_hits[0]/(tcount[0]*ncount[0]) << "(" << h_hits[0] << "/" << tcount[0]*ncount[0] << "), " 
 	<< 1.0 * h_hits[1]/(tcount[1]*ncount[1]) << "(" << h_hits[1] << "/" << tcount[1]*ncount[1] << "), " 
 	<< 1.0 * h_hits[2]/(tcount[2]*ncount[2]) << "(" << h_hits[2] << "/" << tcount[2]*ncount[2] << "), " 
-	<< 1.0 * h_hits[3]/(tcount[3]*ncount[3]) << "(" << h_hits[3] << "/" << tcount[3]*ncount[3] << ")";
+	<< 1.0 * h_hits[3]/(tcount[3]*ncount[3]) << "(" << h_hits[3] << "/" << tcount[3]*ncount[3] << ")"<< endl ;	
+	
+	minCoverage = 1.0;
+    for (int i = 0; i < 4; ++ i){
+      targetCoverage[i] = 1.0 * h_hits[i] / (tcount[i]*ncount[i]);
+	  if (minCoverage > targetCoverage[i])
+	    minCoverage = targetCoverage[i];
+    }
+
+	totalMissed = 0;
+    for (int i = 0; i < 4; ++ i)
+      totalMissed += tcount[i]*ncount[i] - h_hits[i];
+
+    knnMatching_train<<<84, BSIZE>>>();  
+    for (int i = 0; i < 20; ++ i){
+      knnAcc_train<<<1, BSIZE>>>(2 * i + 1);
+      cudaThreadSynchronize();
+      cudaMemcpyFromSymbol(h_hits, hits, sizeof(int) * 4, 0, cudaMemcpyDeviceToHost);
+      cudaMemcpyFromSymbol(&dd[i], acc_knn, sizeof(double), 0, cudaMemcpyDeviceToHost);
+      cout << h_hits[0] + h_hits[1] + h_hits[2] + h_hits[3] << "(" << h_hits[0] << "," << h_hits[1] << "," << h_hits[2] << "," << h_hits[3] << ") ";
+    }
+  
+    double max_acc_train = .0;
+    int max_acc_k_train = -1;
+    for (int i = 0; i < 20; ++ i){
+      if (dd[i] > max_acc_train){
+	    max_acc_train = dd[i];
+    	max_acc_k_train = 2 * i + 1;
+	  }
+    }
+	
+    if (max_acc_train >= global_max_acc_train && iter>10){
+      global_max_acc_train = max_acc_train;
+	  global_max_iter_train = iter;
+	  global_max_pos_train = max_acc_k_train;
+    }
+    cout << endl << "max acc = " << max_acc_train << " at k = " << max_acc_k_train 
+    << ". global max = " << global_max_acc_train << " in iter " << global_max_iter_train << " at k = " << global_max_pos_train;
+	
   }
   else{
 	cout << ", increased by " << dd[9] - f_old;
